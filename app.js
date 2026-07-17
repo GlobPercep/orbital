@@ -188,20 +188,33 @@ const $ = id => document.getElementById(id);
 const setLoad = (pct, msg) => { $('bar').style.width = pct + '%'; $('load-status').textContent = msg; };
 
 async function fetchTLE() {
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); }
+  catch { /* corrupt cache — refetch */ }
+  if (cached && Date.now() - cached.t < TLE_MAX_AGE) {
+    tleFetchedAt = cached.t;
+    return cached.data;
+  }
   try {
-    const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
-    if (cached && Date.now() - cached.t < TLE_MAX_AGE) {
+    const res = await fetch(TLE_URL);
+    if (!res.ok) throw new Error('CelesTrak responded ' + res.status);
+    const text = await res.text();
+    tleFetchedAt = Date.now();
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: tleFetchedAt, data: text })); }
+    catch { /* quota exceeded — run uncached */ }
+    return text;
+  } catch (err) {
+    // CelesTrak throttles repeat downloads per IP (~2 h); TLEs stay usable for
+    // days, so fall back to any cached copy, then to the bundled snapshot.
+    if (cached) {
       tleFetchedAt = cached.t;
       return cached.data;
     }
-  } catch { /* corrupt cache — refetch */ }
-  const res = await fetch(TLE_URL);
-  if (!res.ok) throw new Error('CelesTrak responded ' + res.status);
-  const text = await res.text();
-  tleFetchedAt = Date.now();
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: tleFetchedAt, data: text })); }
-  catch { /* quota exceeded — run uncached */ }
-  return text;
+    const res = await fetch('tle-snapshot.txt');
+    if (!res.ok) throw err;
+    tleFetchedAt = Date.parse(res.headers.get('last-modified') || '') || Date.now() - TLE_MAX_AGE;
+    return await res.text();
+  }
 }
 
 function parseTLE(text) {
@@ -541,8 +554,11 @@ function tick() {
 setInterval(async () => {
   if (Date.now() - tleFetchedAt < TLE_MAX_AGE) return;
   try {
+    const prev = tleFetchedAt;
+    const text = await fetchTLE();
+    if (tleFetchedAt === prev) return;   // fallback returned the same old data
     const sel = selIdx >= 0 ? satnums[selIdx] : null;
-    await initSats(parseTLE(await fetchTLE()), true);
+    await initSats(parseTLE(text), true);
     cursor = 0;
     select(sel ? satnums.indexOf(sel) : -1);
   } catch { /* keep propagating from the old TLEs */ }
