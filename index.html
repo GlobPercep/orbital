@@ -97,6 +97,10 @@
   #retry { display: none; padding: 8px 22px; border-radius: 999px; border: 1px solid var(--accent);
     background: none; color: var(--accent); font-size: 13px; cursor: pointer; }
 
+  #tooltip { position: fixed; display: none; align-items: center; gap: 7px; padding: 6px 10px;
+    font-size: 11.5px; color: #fff; pointer-events: none; z-index: 20; white-space: nowrap; }
+  #tooltip .dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+
   #credit { position: fixed; left: 14px; bottom: 2px; font-size: 9.5px; color: rgba(127,140,166,.55);
     pointer-events: none; z-index: 2; }
 
@@ -158,6 +162,8 @@
   </div>
 </div>
 
+<div id="tooltip" class="panel"><span class="dot"></span><span id="tooltip-name"></span></div>
+
 <div id="credit">TLE data © CelesTrak · SGP4 propagation by satellite.js · imagery: NASA / three.js</div>
 
 <div id="loading">
@@ -172,6 +178,6 @@
 <script type="importmap">
   { "imports": { "three": "./vendor/three.module.js" } }
 </script>
-<script type="module" src="app.js?v=2"></script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>

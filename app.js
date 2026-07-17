@@ -277,6 +277,8 @@ function buildGeometry() {
   }
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  // positions stream in each frame; a fixed sphere out past GEO keeps raycasting valid
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 120);
   posAttr = g.attributes.position;
   satPoints = new THREE.Points(g, new THREE.PointsMaterial({
     size: 0.075, map: glowTex, vertexColors: true, transparent: true,
@@ -295,22 +297,25 @@ let lastReal = performance.now();
 let cursor = 0;
 function chunkSize() { return speed <= 30 ? 1500 : speed <= 120 ? 3000 : 4500; }
 
+function propagateOne(i, date) {
+  if (!alive[i] || !satrecs[i]) return;
+  let pv;
+  try { pv = satellite.propagate(satrecs[i], date); }
+  catch { alive[i] = 0; return; }
+  const p = pv && pv.position;
+  if (!p || Number.isNaN(p.x)) { alive[i] = 0; return; }
+  eciP[i * 3] = p.x; eciP[i * 3 + 1] = p.y; eciP[i * 3 + 2] = p.z;
+  const v = pv.velocity;
+  eciV[i * 3] = v.x; eciV[i * 3 + 1] = v.y; eciV[i * 3 + 2] = v.z;
+  epochMs[i] = date.getTime();
+}
+
 function propagateChunk(date) {
   if (!N) return;
   const count = Math.min(chunkSize(), N);
   for (let k = 0; k < count; k++) {
-    const i = cursor;
+    propagateOne(cursor, date);
     cursor = (cursor + 1) % N;
-    if (!alive[i] || !satrecs[i]) continue;
-    let pv;
-    try { pv = satellite.propagate(satrecs[i], date); }
-    catch { alive[i] = 0; continue; }
-    const p = pv && pv.position;
-    if (!p || Number.isNaN(p.x)) { alive[i] = 0; continue; }
-    eciP[i * 3] = p.x; eciP[i * 3 + 1] = p.y; eciP[i * 3 + 2] = p.z;
-    const v = pv.velocity;
-    eciV[i * 3] = v.x; eciV[i * 3 + 1] = v.y; eciV[i * 3 + 2] = v.z;
-    epochMs[i] = date.getTime();
   }
 }
 
@@ -443,22 +448,73 @@ function updateInfo(force) {
 }
 $('info-close').addEventListener('click', () => select(-1));
 
-/* click-to-pick (ignore drags) */
+/* picking (shared by click and hover) */
 const raycaster = new THREE.Raycaster();
 raycaster.params.Points.threshold = 0.09;
-let downX = 0, downY = 0;
-canvas.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; });
-canvas.addEventListener('pointerup', e => {
-  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6 || !satPoints) return;
-  const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
-  raycaster.setFromCamera(ndc, camera);
+const earthSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), EARTH_R);
+const occV = new THREE.Vector3();
+const pickNdc = new THREE.Vector2();
+
+function pickAt(clientX, clientY) {
+  if (!satPoints) return -1;
+  pickNdc.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pickNdc, camera);
   const hits = raycaster.intersectObject(satPoints);
   for (const h of hits) {
     const i = h.index;
-    if (alive[i] && catVisible[cat[i]] && epochMs[i]) { select(i); return; }
+    if (!alive[i] || !catVisible[cat[i]] || !epochMs[i]) continue;
+    const a = posAttr.array;
+    if (a[i * 3] === 0 && a[i * 3 + 1] === 0 && a[i * 3 + 2] === 0) continue;  // hidden
+    // skip satellites behind the Earth
+    if (raycaster.ray.intersectSphere(earthSphere, occV) &&
+        occV.distanceTo(raycaster.ray.origin) < h.distance) continue;
+    return i;
   }
-  select(-1);
+  return -1;
+}
+
+/* click-to-pick (ignore drags) */
+let downX = 0, downY = 0;
+canvas.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; });
+canvas.addEventListener('pointerup', e => {
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
+  select(pickAt(e.clientX, e.clientY));
 });
+
+/* hover tooltip (mouse only — touch uses tap-to-select) */
+const tooltip = $('tooltip');
+const tooltipName = $('tooltip-name');
+const tooltipDot = tooltip.querySelector('.dot');
+let hoverX = 0, hoverY = 0, hoverDirty = false, lastHoverRun = 0;
+canvas.addEventListener('pointermove', e => {
+  if (e.pointerType !== 'mouse') return;
+  hoverX = e.clientX; hoverY = e.clientY; hoverDirty = true;
+  const now = performance.now();
+  if (now - lastHoverRun > 30) { lastHoverRun = now; updateHover(); }
+});
+canvas.addEventListener('pointerleave', () => {
+  tooltip.style.display = 'none';
+  canvas.style.cursor = '';
+});
+window.__pick = pickAt;   // debug hook
+
+function updateHover() {
+  if (!hoverDirty) return;
+  hoverDirty = false;
+  const i = pickAt(hoverX, hoverY);
+  if (i < 0) {
+    tooltip.style.display = 'none';
+    canvas.style.cursor = '';
+    return;
+  }
+  tooltipName.textContent = names[i];
+  const col = CATS[cat[i]].color;
+  tooltipDot.style.color = tooltipDot.style.background = col;
+  tooltip.style.display = 'flex';
+  tooltip.style.left = Math.min(hoverX + 14, innerWidth - tooltip.offsetWidth - 8) + 'px';
+  tooltip.style.top = Math.min(hoverY + 12, innerHeight - tooltip.offsetHeight - 8) + 'px';
+  canvas.style.cursor = 'pointer';
+}
 
 /* ---------------- search ---------------- */
 const searchEl = $('search'), resultsEl = $('search-results');
@@ -545,6 +601,7 @@ function tick() {
   writePositions(gmst);
   updateSun(gmst);
   if (selIdx >= 0) { updateSelectionVisuals(gmst); updateInfo(); }
+  updateHover();
   updateHud();
   controls.update();
   renderer.render(scene, camera);
@@ -574,6 +631,10 @@ async function boot() {
     const tles = parseTLE(text);
     if (!tles.length) throw new Error('no TLE data received');
     await initSats(tles, false);
+    setLoad(97, 'computing orbits…');
+    const d = new Date(simTime);
+    for (let i = 0; i < N; i++) propagateOne(i, d);
+    writePositions(satellite.gstime(d));
     setLoad(100, 'ready');
     updateStats();
     $('loading').classList.add('done');
